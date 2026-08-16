@@ -42,17 +42,17 @@ REGIONS = {
 
 STATE_FILE = Path(__file__).parent / "seen_items.json"
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 # Optional: set this to post into a specific topic in a Telegram forum
 # group, instead of the group's General chat. See README.md for how
 # to find a topic's ID.
-TELEGRAM_MESSAGE_THREAD_ID = os.environ.get("TELEGRAM_MESSAGE_THREAD_ID", "")
+TELEGRAM_MESSAGE_THREAD_ID = os.environ.get("TELEGRAM_MESSAGE_THREAD_ID", "").strip()
 # Optional: your personal/private Telegram chat ID. When set, "no new
 # items" status pings go here instead of the group, so the group only
 # ever sees actual new-item alerts. If unset, status pings fall back
 # to TELEGRAM_CHAT_ID like everything else.
-TELEGRAM_PRIVATE_CHAT_ID = os.environ.get("TELEGRAM_PRIVATE_CHAT_ID", "")
+TELEGRAM_PRIVATE_CHAT_ID = os.environ.get("TELEGRAM_PRIVATE_CHAT_ID", "").strip()
 
 # Turn this on only after you've implemented attempt_purchase() yourself.
 AUTO_BUY = False
@@ -200,7 +200,15 @@ def fetch_all_regions():
 def load_seen():
     """Returns {region: {item_id: {name, url}}}, defaulting missing regions to {}."""
     if STATE_FILE.exists():
-        data = json.loads(STATE_FILE.read_text())
+        try:
+            data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            # Corrupted/mis-encoded state file — don't crash the whole run.
+            # Worst case we re-notify on already-seen items once; that's
+            # far better than the bot failing every run from here on.
+            print(f"WARNING: could not read {STATE_FILE.name} ({e}). "
+                  f"Treating as empty and starting fresh.")
+            data = {}
     else:
         data = {}
     for region in REGIONS:
@@ -209,7 +217,9 @@ def load_seen():
 
 
 def save_seen(items):
-    STATE_FILE.write_text(json.dumps(items, indent=2, ensure_ascii=False))
+    STATE_FILE.write_text(
+        json.dumps(items, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +252,19 @@ def notify_telegram(text: str, chat_id: str = None, thread_id: str = None):
         data=data,
         timeout=15,
     )
-    resp.raise_for_status()
+    try:
+        resp.raise_for_status()
+    except requests.exceptions.HTTPError:
+        # Telegram's response body has the actual reason (e.g. "chat not
+        # found", "message thread not found") — surface it instead of
+        # just failing with a bare "400 Bad Request".
+        print(f"Telegram API rejected the request (chat_id={chat_id}, "
+              f"thread_id={thread_id or None}):")
+        print(f"  {resp.status_code} {resp.text}")
+        print("Common causes: chat_id is wrong, or (for a private chat) "
+              "you haven't sent the bot a message yet — bots can't "
+              "message a user first. See README.md.")
+        raise
 
 
 # ---------------------------------------------------------------------------
