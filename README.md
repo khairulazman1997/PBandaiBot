@@ -53,6 +53,14 @@ group/topic), but "no new items" status pings go to your private chat
 instead. Leave it unset and status pings just go wherever
 `TELEGRAM_CHAT_ID` points, same as new-item alerts.
 
+**Important:** a bot can't message you first — Telegram only lets it
+reply to chats you've already started. Make sure you've sent your bot
+at least one direct message (step 1 above) before setting
+`TELEGRAM_PRIVATE_CHAT_ID`, or you'll get a `400 Bad Request: chat not
+found` error. If you do hit a Telegram API error, the bot now prints
+the actual reason from Telegram's response (not just "400 Bad
+Request") — check the run log for the specific message.
+
 ## 2. Try it locally (optional but recommended)
 
 ```bash
@@ -92,6 +100,32 @@ once a day for ~1 minute).
    change the times (cron times are in UTC; SGT is UTC+8).
 4. You can also trigger a run manually anytime from the **Actions** tab
    ("Run workflow").
+
+## Once secrets are added — pre-flight checklist
+
+1. **Allow the workflow to write back to the repo.** The workflow
+   already declares `permissions: contents: write`, but if your repo
+   or org has a stricter default, double-check under **Settings →
+   Actions → General → Workflow permissions** that "Read and write
+   permissions" is selected — otherwise the step that commits
+   `seen_items.json` will fail with a 403.
+2. **Do a manual test run first**, rather than waiting for the
+   schedule: **Actions tab → Check Premium Bandai SG - One Piece →
+   Run workflow**. Watch the run's logs to confirm it actually reached
+   both regions and sent (or attempted to send) a Telegram message.
+3. **Expect a flood of alerts on the very first run.** Since
+   `seen_items.json` doesn't exist yet, everything currently listed
+   counts as "new" — that's expected, not a bug. Every run after that
+   will only alert on genuine changes.
+4. **If Telegram messages fail**, check the run log — `bot.py` prints
+   Telegram's actual rejection reason (e.g. "chat not found") rather
+   than a bare error code.
+5. Scheduled GitHub Actions workflows are **disabled automatically
+   after 60 days of repo inactivity** (no pushes/commits) — a commit
+   from `git-auto-commit-action` counts as activity, so as long as the
+   bot is finding and committing state changes, this won't matter, but
+   it's worth checking on the **Actions** tab occasionally to confirm
+   the schedule is still enabled.
 
 State (which items have already been seen/notified) is stored in
 `seen_items.json` in the repo, keyed by region (`SG` / `US`), and the

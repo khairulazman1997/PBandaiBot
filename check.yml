@@ -8,6 +8,9 @@ on:
     - cron: "0 16 * * *"
   workflow_dispatch: {}   # lets you trigger a manual run from the Actions tab
 
+permissions:
+  contents: write   # required so git-auto-commit-action can push seen_items.json back
+
 jobs:
   check:
     runs-on: ubuntu-latest
