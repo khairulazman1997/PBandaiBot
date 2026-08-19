@@ -217,6 +217,22 @@ def fetch_items_for_region(page, region: str, url: str):
 
         items[item_id] = {"name": name, "url": item_url}
 
+    if not items:
+        # Nothing matched — dump diagnostics so the log explains *why*
+        # instead of just "no items found" (e.g. reveals maintenance
+        # wording we don't recognize yet, a bot-block/CAPTCHA page, or
+        # a genuine markup change).
+        try:
+            title = (page.title() or "").strip()
+        except Exception:
+            title = "(could not read title)"
+        try:
+            snippet = (page.inner_text("body") or "").strip().replace("\n", " ")[:300]
+        except Exception:
+            snippet = "(could not read body text)"
+        print(f"[{region}] No product cards matched. Page title: {title!r}")
+        print(f"[{region}] Body text snippet: {snippet!r}")
+
     return items, False
 
 
