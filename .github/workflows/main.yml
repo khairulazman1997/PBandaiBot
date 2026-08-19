@@ -14,6 +14,9 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # Without this, a hung step (e.g. apt-get stuck on a flaky mirror)
+    # can run for GitHub's default 6-hour job timeout before failing.
+    timeout-minutes: 15
     steps:
       - name: Checkout repo
         uses: actions/checkout@v5
@@ -22,6 +25,15 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.11"
+
+      - name: Use reliable apt mirror
+        # GitHub's Azure-hosted runners sometimes point apt at
+        # azure.archive.ubuntu.com, which can be flaky and cause
+        # apt-get to hang retrying instead of failing fast. Point it at
+        # the standard Ubuntu archive instead before installing anything.
+        run: |
+          sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|http://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list
+          sudo apt-get update
 
       - name: Install dependencies
         run: |
