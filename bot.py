@@ -71,6 +71,30 @@ PRODUCT_CARD_SELECTOR = "a[href*='/item/']"
 # CONTAINER_SELECTOR = "#series-item-list" or ".p-series-list__items"
 CONTAINER_SELECTOR = None
 
+# Phrases that indicate the page is showing a maintenance notice rather
+# than the actual product grid. Lowercased, substring match.
+# The first few are exact wording confirmed from Premium Bandai's real
+# maintenance page (Aug 2026): a page titled "MAINTENANCE" with the text
+# "Our service is temporarily unavailable due to a system maintenance."
+# and a "MAINTENANCE PERIOD" section listing timezones.
+MAINTENANCE_KEYWORDS = [
+    "temporarily unavailable due to a system maintenance",
+    "maintenance period",
+    "temporarily unavailable",
+    "system maintenance",
+    "under maintenance",
+    "scheduled maintenance",
+    "site maintenance",
+    "maintenance in progress",
+    "currently undergoing maintenance",
+    "performing maintenance",
+    "service is currently unavailable",
+]
+
+# If the page's <title> is exactly this (case-insensitive), treat it as
+# maintenance even if body text extraction fails for some reason.
+MAINTENANCE_TITLE_EXACT = "maintenance"
+
 # Cards whose ancestor chain has a class/id containing any of these
 # (case-insensitive) are skipped even without CONTAINER_SELECTOR set —
 # catches common "recommended for you" / related-item widget names.
@@ -112,13 +136,42 @@ def _get_ancestor_signature(card):
     ).lower()
 
 
+def _looks_like_maintenance(page, response) -> bool:
+    """Best-effort check for a maintenance page instead of the real site.
+    Checks the HTTP status and the rendered page's title/text for
+    known maintenance phrasing."""
+    if response is not None and response.status in (503, 502, 500):
+        return True
+
+    try:
+        title = (page.title() or "").strip().lower()
+    except Exception:
+        title = ""
+
+    if title == MAINTENANCE_TITLE_EXACT:
+        return True
+
+    try:
+        body_text = (page.inner_text("body") or "").lower()
+    except Exception:
+        body_text = ""
+
+    haystack = title + " " + body_text
+    return any(kw in haystack for kw in MAINTENANCE_KEYWORDS)
+
+
 def fetch_items_for_region(page, region: str, url: str):
     """Render one region's page with a headless browser and pull out product cards,
-    excluding anything inside a recommendation/related-items widget."""
+    excluding anything inside a recommendation/related-items widget.
+
+    Returns (items, is_maintenance)."""
     items = {}
     item_path_marker = f"/{region.lower()}/item/"
 
-    page.goto(url, wait_until="networkidle", timeout=60_000)
+    response = page.goto(url, wait_until="networkidle", timeout=60_000)
+
+    if _looks_like_maintenance(page, response):
+        return items, True
 
     # Dismiss cookie banner if present (best-effort, ignore failures)
     try:
@@ -164,12 +217,16 @@ def fetch_items_for_region(page, region: str, url: str):
 
         items[item_id] = {"name": name, "url": item_url}
 
-    return items
+    return items, False
 
 
 def fetch_all_regions():
-    """Returns {region: {item_id: {name, url}}} for every configured region."""
+    """Returns (results, maintenance_regions):
+    - results: {region: {item_id: {name, url}}} for every configured region
+    - maintenance_regions: list of regions currently showing a maintenance page
+    """
     results = {}
+    maintenance_regions = []
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -183,14 +240,19 @@ def fetch_all_regions():
 
         for region, url in REGIONS.items():
             try:
-                results[region] = fetch_items_for_region(page, region, url)
+                items, is_maintenance = fetch_items_for_region(page, region, url)
+                results[region] = items
+                if is_maintenance:
+                    maintenance_regions.append(region)
+                    print(f"[{region}] Site appears to be under maintenance — "
+                          f"skipping this region for this run.")
             except Exception as e:
                 print(f"[{region}] Failed to fetch: {e}")
                 results[region] = {}
 
         browser.close()
 
-    return results
+    return results, maintenance_regions
 
 
 # ---------------------------------------------------------------------------
@@ -302,9 +364,25 @@ def attempt_purchase(item: dict):
 # ---------------------------------------------------------------------------
 
 def main():
-    current = fetch_all_regions()
+    current, maintenance_regions = fetch_all_regions()
+
+    if maintenance_regions:
+        maint_text = (
+            f"🛠️ Premium Bandai maintenance detected: "
+            f"{', '.join(maintenance_regions)} — skipping those region(s) "
+            f"this run, will retry next scheduled check."
+        )
+        print(maint_text)
+        if TELEGRAM_PRIVATE_CHAT_ID:
+            # Private chats don't have topics, so no thread_id here.
+            notify_telegram(maint_text, chat_id=TELEGRAM_PRIVATE_CHAT_ID, thread_id="")
+        else:
+            notify_telegram(maint_text)
 
     if not any(current.values()):
+        if maintenance_regions:
+            # Every region was in maintenance — nothing more to do this run.
+            return
         print("No items found in any region — the page structure may have "
               "changed. Check PRODUCT_CARD_SELECTOR in bot.py.")
         sys.exit(1)
@@ -313,6 +391,11 @@ def main():
     any_new = False
 
     for region, items in current.items():
+        if region in maintenance_regions:
+            # Don't touch this region's state — we didn't get a real read
+            # on it this run, so leave last-known state as-is.
+            continue
+
         if not items:
             print(f"[{region}] No items found this run — skipping "
                   f"(leaving previous state untouched for this region).")
@@ -345,17 +428,19 @@ def main():
     if not any_new:
         print("Nothing new across any region.")
         checked_regions = ", ".join(
-            region for region, items in current.items() if items
+            region for region, items in current.items()
+            if items and region not in maintenance_regions
         )
-        status_text = (
-            f"✅ Checked Premium Bandai ({checked_regions}) — no new "
-            f"One Piece items since last check."
-        )
-        if TELEGRAM_PRIVATE_CHAT_ID:
-            # Private chats don't have topics, so no thread_id here.
-            notify_telegram(status_text, chat_id=TELEGRAM_PRIVATE_CHAT_ID, thread_id="")
-        else:
-            notify_telegram(status_text)
+        if checked_regions:
+            status_text = (
+                f"✅ Checked Premium Bandai ({checked_regions}) — no new "
+                f"One Piece items since last check."
+            )
+            if TELEGRAM_PRIVATE_CHAT_ID:
+                # Private chats don't have topics, so no thread_id here.
+                notify_telegram(status_text, chat_id=TELEGRAM_PRIVATE_CHAT_ID, thread_id="")
+            else:
+                notify_telegram(status_text)
 
     save_seen(seen)
 
