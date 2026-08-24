@@ -95,9 +95,10 @@ once a day for ~1 minute).
    - `TELEGRAM_PRIVATE_CHAT_ID` (optional — only if you want "no new
      items" pings sent to your private chat instead of the group, see
      above)
-3. That's it. The workflow runs twice daily — 12:00 SGT (noon) and
-   00:00 SGT (midnight) — edit the `cron` lines in `check.yml` to
-   change the times (cron times are in UTC; SGT is UTC+8).
+3. That's it. The workflow runs three times daily — 12:00 SGT (noon),
+   15:20 SGT, and 00:00 SGT (midnight) — edit the `cron` lines in
+   `check.yml` to change the times (cron times are in UTC; SGT is
+   UTC+8).
 4. You can also trigger a run manually anytime from the **Actions** tab
    ("Run workflow").
 
@@ -167,6 +168,47 @@ If you want to build it out yourself, the docstring in
 Playwright's `storage_state`, navigating to the item, selecting
 options, proceeding to checkout).
 
+## Including "No Longer Available" items
+
+By default (`INCLUDE_NO_LONGER_AVAILABLE = True` in `bot.py`), the bot
+also ticks the "No Longer Available Items" filter on the page, so
+results include sold-out/ended listings, not just Upcoming/Available.
+
+**Heads up:** the first run after this is enabled will flood you with
+"new item" alerts — every previously-unseen sold-out item (dozens,
+potentially) suddenly counts as "new" since it wasn't in
+`seen_items.json` before. That's expected, one-time noise; every run
+after that only alerts on genuinely new changes. If you'd rather avoid
+that flood, run the bot once locally first to populate
+`seen_items.json`, then push that file before your next scheduled run.
+
+Set `INCLUDE_NO_LONGER_AVAILABLE = False` to go back to only
+Upcoming/Available items.
+
+**Note:** with ~94 sold-out items included, the first-run flood of
+"new item" alerts would exceed Telegram's ~4096-character message
+limit as a single message. The bot automatically splits long alert
+lists into multiple messages (labelled "part 1/2", "part 2/2", etc.)
+— see `notify_telegram_lines()` in `bot.py` if you want to adjust the
+chunk size.
+
+## Pagination
+
+The bot now pages through **all** result pages, not just the first.
+It clicks the "40 per page" option first (to reduce page count), then
+clicks the "next page" arrow repeatedly, merging items from each page,
+until there's no next page or it hits a safety cap (`MAX_PAGES = 20`
+in `bot.py` — raise this if a region genuinely has more pages than
+that).
+
+If pagination selectors don't match the real site (the "next" button
+markup wasn't verifiable without live access), you'll see the bot only
+collect the items visible on page 1, same as before. Run with
+`DEBUG=1` to see a per-page item count in the log — if it stops after
+page 1 with more items still expected, inspect the "next" arrow's HTML
+(F12 → Elements) and update the `next_selectors` list in
+`_go_to_next_page()` in `bot.py`.
+
 ## Notes
 
 - Selector used to find product cards: `a[href*='/item/']` in
@@ -177,8 +219,25 @@ options, proceeding to checkout).
   is rendered client-side (a plain `requests` fetch only returns an
   empty shell).
 
-## Fixing false positives (e.g. "Recommended for you" items)
+## Maintenance detection
 
+Premium Bandai occasionally takes the site down for scheduled
+maintenance. When that happens, `bot.py`:
+
+1. Detects it via the HTTP response status (503/502/500) or common
+   maintenance phrasing in the page's title/text (see
+   `MAINTENANCE_KEYWORDS` in `bot.py` — extend this list if you spot
+   wording it misses).
+2. Sends a one-line alert **to your private chat** (`TELEGRAM_PRIVATE_CHAT_ID`
+   if set, otherwise the group) — this is a "heads up, bot noticed
+   something odd" ping, not a group-worthy alert.
+3. Skips scraping that region for the run and leaves its stored state
+   untouched, so nothing gets wrongly marked as "no longer listed" or
+   re-flagged as "new" once the site is back up.
+4. Retries normally on the next scheduled run — no manual action
+   needed, maintenance windows are usually short.
+
+## Fixing false positives (e.g. "Recommended for you" items)
 Premium Bandai's series pages often show carousels like "Recommended",
 "Related items", or "Ranking" alongside the main product grid. Since
 these link to `/item/...` too, the bot filters them out by:

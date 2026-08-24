@@ -57,6 +57,12 @@ TELEGRAM_PRIVATE_CHAT_ID = os.environ.get("TELEGRAM_PRIVATE_CHAT_ID", "").strip(
 # Turn this on only after you've implemented attempt_purchase() yourself.
 AUTO_BUY = False
 
+# If True, also include "No Longer Available Items" (sold-out/ended
+# listings) in results, not just Upcoming/Available. On the very first
+# run after turning this on, expect a flood of "new item" alerts since
+# ~94 previously-unseen sold-out items will suddenly appear.
+INCLUDE_NO_LONGER_AVAILABLE = True
+
 # Selector guess — Premium Bandai's markup can change without notice.
 # If the bot stops finding items on a region, inspect that region's page
 # (F12 → Elements) and update this. It matches both /sg/item/ and
@@ -160,28 +166,14 @@ def _looks_like_maintenance(page, response) -> bool:
     return any(kw in haystack for kw in MAINTENANCE_KEYWORDS)
 
 
-def fetch_items_for_region(page, region: str, url: str):
-    """Render one region's page with a headless browser and pull out product cards,
-    excluding anything inside a recommendation/related-items widget.
+MAX_PAGES = 20  # safety cap so a broken "next" click can't loop forever
 
-    Returns (items, is_maintenance)."""
-    items = {}
-    item_path_marker = f"/{region.lower()}/item/"
 
-    response = page.goto(url, wait_until="networkidle", timeout=60_000)
-
-    if _looks_like_maintenance(page, response):
-        return items, True
-
-    # Dismiss cookie banner if present (best-effort, ignore failures)
-    try:
-        page.click("text=Allow All", timeout=3000)
-    except Exception:
-        pass
-
-    # Give any lazy-loaded content a moment to render
-    page.wait_for_timeout(2000)
-
+def _extract_cards_into(page, region: str, items: dict, item_path_marker: str) -> int:
+    """Extracts matching product cards currently in the DOM into `items`
+    (mutated in place). Returns how many *new* items were added, which
+    the pagination loop uses to detect "no more new items on this page"
+    (a sign we've hit the end, or a stuck 'next' button)."""
     if CONTAINER_SELECTOR:
         scope = page.query_selector(CONTAINER_SELECTOR)
         if scope is None:
@@ -194,6 +186,7 @@ def fetch_items_for_region(page, region: str, url: str):
     else:
         cards = page.query_selector_all(PRODUCT_CARD_SELECTOR)
 
+    added = 0
     for card in cards:
         href = card.get_attribute("href") or ""
         if item_path_marker not in href:
@@ -215,7 +208,103 @@ def fetch_items_for_region(page, region: str, url: str):
         item_id = href.rstrip("/").split("/")[-1]
         name = (card.inner_text() or "").strip().split("\n")[0] or item_id
 
+        if item_id not in items:
+            added += 1
         items[item_id] = {"name": name, "url": item_url}
+
+    return added
+
+
+def _go_to_next_page(page, region: str) -> bool:
+    """Best-effort click of the pagination 'next' control. Returns True
+    if a click succeeded and the grid appears to have changed, False if
+    there's no next page (or it couldn't find/click the control)."""
+    next_selectors = [
+        "[aria-label='Next']",
+        "[aria-label='Next page']",
+        "a[rel='next']",
+        ".pagination-next:not(.disabled)",
+        ".pager-next:not(.disabled)",
+    ]
+    for sel in next_selectors:
+        try:
+            btn = page.query_selector(sel)
+            if btn is None:
+                continue
+            # Skip if it looks disabled
+            disabled = btn.get_attribute("disabled")
+            aria_disabled = btn.get_attribute("aria-disabled")
+            classes = (btn.get_attribute("class") or "").lower()
+            if disabled is not None or aria_disabled == "true" or "disabled" in classes:
+                return False
+            btn.click(timeout=5000)
+            page.wait_for_load_state("networkidle", timeout=15_000)
+            page.wait_for_timeout(1500)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def fetch_items_for_region(page, region: str, url: str):
+    """Render one region's page with a headless browser and pull out product cards
+    across all pages, excluding anything inside a recommendation/related-items widget.
+
+    Returns (items, is_maintenance)."""
+    items = {}
+    item_path_marker = f"/{region.lower()}/item/"
+
+    response = page.goto(url, wait_until="networkidle", timeout=60_000)
+
+    if _looks_like_maintenance(page, response):
+        return items, True
+
+    # Dismiss cookie banner if present (best-effort, ignore failures)
+    try:
+        page.click("text=Allow All", timeout=3000)
+    except Exception:
+        pass
+
+    if INCLUDE_NO_LONGER_AVAILABLE:
+        # Tick the "No Longer Available Items" filter checkbox so the
+        # results include sold-out/ended listings too, not just
+        # Upcoming/Available. This is a JS filter toggle, not a URL
+        # param, so we click it and wait for the grid to refresh.
+        try:
+            page.click("text=No Longer Available Items", timeout=5000)
+            page.wait_for_load_state("networkidle", timeout=15_000)
+            page.wait_for_timeout(1500)
+        except Exception as e:
+            print(f"[{region}] Could not toggle 'No Longer Available "
+                  f"Items' filter (page structure may differ): {e}")
+
+    # Bump results-per-page to 40 (if available) so there are fewer
+    # pages to click through. Best-effort — falls back to default if
+    # this control isn't found.
+    try:
+        page.click("text=40", timeout=3000)
+        page.wait_for_load_state("networkidle", timeout=15_000)
+        page.wait_for_timeout(1500)
+    except Exception:
+        pass
+
+    # Give any lazy-loaded content a moment to render
+    page.wait_for_timeout(2000)
+
+    # Walk through every page of results, merging cards as we go.
+    for page_num in range(1, MAX_PAGES + 1):
+        added = _extract_cards_into(page, region, items, item_path_marker)
+        if DEBUG:
+            print(f"[{region}] DEBUG page {page_num}: {added} new items "
+                  f"(running total: {len(items)})")
+
+        moved = _go_to_next_page(page, region)
+        if not moved:
+            break
+    else:
+        print(f"[{region}] Hit MAX_PAGES ({MAX_PAGES}) safety cap — there "
+              f"may be more items than were collected. Raise MAX_PAGES in "
+              f"bot.py if this region genuinely has more pages.")
 
     if not items:
         # Nothing matched — dump diagnostics so the log explains *why*
@@ -303,6 +392,37 @@ def save_seen(items):
 # ---------------------------------------------------------------------------
 # Telegram
 # ---------------------------------------------------------------------------
+
+TELEGRAM_SAFE_CHUNK_LEN = 3500  # Telegram's hard cap is 4096; leave margin
+
+
+def notify_telegram_lines(lines: list, chat_id: str = None, thread_id: str = None):
+    """Sends a list of lines as one or more Telegram messages, splitting
+    into multiple messages if the combined text would exceed Telegram's
+    ~4096 character limit (e.g. a long list of new items). Splits on
+    line boundaries so HTML tags never get cut mid-way."""
+    if not lines:
+        return
+
+    chunks = []
+    current, current_len = [], 0
+    for line in lines:
+        add_len = len(line) + 1  # +1 for the joining newline
+        if current and current_len + add_len > TELEGRAM_SAFE_CHUNK_LEN:
+            chunks.append(current)
+            current, current_len = [], 0
+        current.append(line)
+        current_len += add_len
+    if current:
+        chunks.append(current)
+
+    total = len(chunks)
+    for idx, chunk_lines in enumerate(chunks, start=1):
+        text = "\n".join(chunk_lines)
+        if total > 1:
+            text += f"\n\n(part {idx}/{total})"
+        notify_telegram(text, chat_id=chat_id, thread_id=thread_id)
+
 
 def notify_telegram(text: str, chat_id: str = None, thread_id: str = None):
     """Sends a Telegram message. Defaults to the group chat + topic
@@ -426,7 +546,7 @@ def main():
             for item_id in new_ids:
                 item = items[item_id]
                 lines.append(f"\n• <a href=\"{item['url']}\">{item['name']}</a>")
-            notify_telegram("\n".join(lines))
+            notify_telegram_lines(lines)
 
             if AUTO_BUY:
                 for item_id in new_ids:
