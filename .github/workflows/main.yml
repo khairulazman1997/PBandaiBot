@@ -2,12 +2,16 @@ name: Check Premium Bandai SG - One Piece
 
 on:
   schedule:
-    # 04:00 UTC = 12:00 SGT (noon)
-    - cron: "0 4 * * *"
-    # 07:20 UTC = 15:20 SGT (3:20 PM)
-    - cron: "20 7 * * *"
-    # 16:00 UTC = 00:00 SGT (midnight)
-    - cron: "0 16 * * *"
+    # GitHub Actions schedules are "best effort" and get delayed during
+    # high-load periods — most of all at :00 and :30, since that's when
+    # everyone else's cron jobs fire too. Offsetting a few minutes off
+    # the round number noticeably reduces queueing delay.
+    # ~04:07 UTC = ~12:07 SGT (near noon)
+    - cron: "7 4 * * *"
+    # ~07:24 UTC = ~15:24 SGT (near 3:20 PM)
+    - cron: "24 7 * * *"
+    # ~16:13 UTC = ~00:13 SGT (near midnight)
+    - cron: "13 16 * * *"
   workflow_dispatch: {}   # lets you trigger a manual run from the Actions tab
 
 permissions:
